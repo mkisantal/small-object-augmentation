@@ -1,19 +1,22 @@
 from pycocotools.coco import COCO
 import pycocotools.mask as mask_util
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import os
 import matplotlib.pyplot as plt
 import skimage.io as io
 import numpy as np
 import cv2
-from code import interact
 from random import randint
 from math import cos, sin, radians
-from datetime import datetime
 import json
+from multiprocessing import Pool
+from multiprocessing.dummy import Pool as ThreadPool
+import tqdm
+
 
 # parameters
+DATASET = 'val2017'
 MARGIN = 5  # [px]
 ANGLE = 15  # [+/- deg]
 SCALE = 20  # [+/- %]
@@ -43,317 +46,338 @@ class SegmentedObject:
         self.original_annotation = original_annotation
 
 
-class DatasetAugmenter:
-    def __init__(self, dataset):
-        self.ann_file = './annotations/instances_{}.json'.format(dataset)
-        self.augmented_ann_file = './annotations/instances_{}_augmented.json'.format(dataset)
-        
-        self.dataset_path = './{}/'.format(dataset)
-        self.augmented_path = './{}_augmented/'.format(dataset)
-        if not os.path.exists(self.augmented_path):
-            os.makedirs(self.augmented_path)
+def show_ann_on_image(coco, ann_ids, img=None):
+    if img is None:
+        ann0 = coco.anns[ann_ids[0]]
+        img = coco.imgs[ann0['image_id']]
+        np_img = io.imread(img['coco_url'])
+    else:
+        np_img = np.array(img)
+    anns = []
+    for ann_id in ann_ids:
+        ann = coco.anns[ann_id]
+        anns.append(ann)
+        print('Object: {}, size: {:01f}'.format(coco.cats[ann['category_id']]['name'], ann['area']))
+    plt.imshow(np_img);
+    plt.axis('off')
+    coco.showAnns(anns)
+    plt.show()
 
-        self.coco = COCO(self.ann_file)
-        self.object_id = int(9e12)
-        self.pasted_id_list = []
+
+def get_pil_image(coco_image):
+
+    """ Given a COCO image dict loading the corresponding image as PIL.Image. """
+
+    augmented_path = './{}_augmented/'.format(DATASET)
+    dataset_path = './{}/'.format(DATASET)
+    file_name = coco_image['file_name']
+    if file_name is not None:
+        if os.path.exists(os.path.join(augmented_path, file_name)):
+            # if we augmented it already, continue pasting on that image
+            img = Image.open(os.path.join(augmented_path, file_name))
+        else:
+            img = Image.open(os.path.join(dataset_path, file_name))
+        return img
 
 
-    def get_pil_image(self, ann_id=None, image_id=None):
+def get_object(ann, source_image):
 
-        """ Given an annotation or image id loading the corresponding image as PIL.Image. """
+    """ Create a SegmentedObject: create binary mask, get the relevant crops from original and mask. """
 
-        file_name = None
-        if ann_id is not None:
-            ann = self.coco.anns[ann_id]
-            file_name = self.coco.imgs[ann['image_id']]['file_name']
-        elif image_id is not None:
-            file_name = self.coco.imgs[image_id]['file_name']
-        if file_name is not None:
-            if os.path.exists(os.path.join(self.augmented_path, file_name)):
-                # if we augmented it already, continue pasting on that image
-                img = Image.open(os.path.join(self.augmented_path, file_name))
+    if len(ann['segmentation']) > 1:
+        return None
+    if ann['area'] < AREA_MIN or ann['area'] > AREA_MAX:
+        return None
+
+    polygons = ann['segmentation']
+    mask = binary_mask_from_polygons(polygons, source_image.width, source_image.height)
+    mask_crop, origin_x, origin_y = crop_bbox_simple(mask, ann['bbox'])
+    img_crop = crop_bbox_simple(source_image, ann['bbox'])
+
+    # shift polygon origin
+    shifted_polys = []
+    for polygon in polygons:
+        poly = np.array(polygon)
+        poly = np.reshape(polygon, [np.max(poly.shape)/2, 2])
+        poly = poly - np.array([origin_x, origin_y])
+        shifted_polys.append(poly)
+
+    obj = SegmentedObject(img_crop, mask_crop, ann, shifted_polys)
+    return obj
+
+
+def binary_mask_from_polygons(polygons, width, height):
+
+    """ Creating a binary mask matrix from polygon. """
+
+    rle = mask_util.frPyObjects(polygons, height, width)  # Run-Length Encoding
+    decoded = mask_util.decode(rle)
+    if decoded.ndim == 3:    # disjoint object, multiple outline polygons on different channels
+        decoded = np.amax(decoded, 2)    # flattening by taking max along channels
+    mask = np.squeeze(decoded).transpose()  # binary mask
+    return mask
+
+
+def binary_mask_from_polygons2(polygons, width, height):
+
+    """ Alternative implementation of binary mask creation. """
+
+    img = Image.new('L', (height, width), 0)
+    for poly in polygons:
+        ImageDraw.Draw(img).polygon(poly, outline=1, fill=1)
+    mask = np.array(img)
+    return mask
+
+
+def crop_bbox_simple(img, bbox):
+
+    """ Cropping rectangular area from original or mask image, with added margins. """
+
+    bbox = [int(i) for i in bbox]
+
+    # calculating actual margin that accomodates rotation
+    m = MARGIN + abs(bbox[2] - bbox[3]) / 2
+    origin_x = bbox[0] - m
+    origin_y = bbox[1] - m
+
+    if type(img) is np.ndarray:
+        # creating an empty image of sufficient size, and pasting original image on it
+        padded_image = np.zeros([img.shape[0] + 2 * m, img.shape[1] + 2 * m])
+        padded_image[m:m + img.shape[0], m:m + img.shape[1]] = img
+        # cropping from padded image with margins
+        xmin = bbox[0]  # Note: margin is both added and subtracted
+        ymin = bbox[1]
+        xmax = bbox[0] + bbox[2] + 2 * m
+        ymax = bbox[1] + bbox[3] + 2 * m
+        cropped_with_margins = padded_image[xmin:xmax, ymin:ymax]
+        return np.copy(np.uint8(cropped_with_margins)), origin_x, origin_y
+    else:
+        # similar calculation as above for PIL.Image
+        padded_array = np.zeros([img.height + 2 * m, img.width + 2 * m, 3], dtype=np.uint8)
+        padded_image = Image.fromarray(padded_array)
+        padded_image.paste(img, box=(m, m))
+        xmin = bbox[0]
+        ymin = bbox[1]
+        xmax = bbox[0] + bbox[2] + 2 * m
+        ymax = bbox[1] + bbox[3] + 2 * m
+        cropped_with_margins = padded_image.crop(box=(xmin, ymin, xmax, ymax))
+        return cropped_with_margins
+
+
+def paste_object(obj, target_image, occupancy_image, n=N, anns=()):
+
+    """ Paste the extracted SegmentedObject on an image n times, default target is the source image. """
+
+    if obj is None:
+        return target_image, anns, occupancy_image
+
+    for i in range(n):
+        overlap = True
+        paste_trials = 0
+        while overlap:
+            if paste_trials > 10:
+                # don't get stuck if image is already filled
+                break
+            obj_img = obj.image
+            mask_img = Image.fromarray(obj.mask.transpose()*255)
+
+            paste_param = get_paste_parameters(target_image, obj_img)
+
+            # image transformation
+            obj_img = obj_img.rotate(paste_param['angle'], resample=Image.BICUBIC, expand=False)
+            mask_img = mask_img.rotate(paste_param['angle'], resample=Image.BICUBIC, expand=False)
+
+            new_size = (np.array(obj_img.size) * paste_param['scale']).astype(np.int)
+            obj_img = obj_img.resize(new_size, resample=Image.BICUBIC)
+            mask_img = mask_img.resize(new_size, resample=Image.BICUBIC)
+
+            overlap, new_occ_img = check_overlap(mask_img, paste_param, occupancy_image)
+            if overlap:
+                paste_trials += 1
+                continue
             else:
-                img = Image.open(os.path.join(self.dataset_path, file_name))
-            return img
+                occupancy_image = new_occ_img
+
+            if BLUR_EDGES:
+                mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
+
+            target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
+            anns.append(create_new_ann(obj, paste_param))
+
+    return target_image, anns, occupancy_image
 
 
-    def crop_bbox_simple(self, img, bbox, margin=0, padding_for_rotation=False):
+def get_paste_parameters(target_image, obj_img):
 
-        """ Cropping rectangular area from original or mask image, with added margins. """
-        
-        bbox = [int(i) for i in bbox]
+    """ Generating parameters for object placement. """
 
-        # calculating actual margin that accomodates rotation
-        m = MARGIN + abs(bbox[2]-bbox[3]) / 2
-        origin_x = bbox[0] - m
-        origin_y = bbox[1] - m
-
-        if type(img) is np.ndarray:
-            # creating an empty image of sufficient size, and pasting original image on it
-            padded_image = np.zeros([img.shape[0]+2*m, img.shape[1]+2*m])
-            padded_image[m:m+img.shape[0], m:m+img.shape[1]] = img
-            # cropping from padded image with margins
-            xmin = bbox[0] # Note: margin is both added and subtracted
-            ymin = bbox[1]
-            xmax = bbox[0] + bbox[2] + 2*m
-            ymax = bbox[1] + bbox[3] + 2*m
-            cropped_with_margins = padded_image[xmin:xmax,ymin:ymax]
-            return np.copy(np.uint8(cropped_with_margins)), origin_x, origin_y
-        else:
-            # similar calculation as above for PIL.Image
-            padded_array = np.zeros([img.height+2*m, img.width+2*m, 3], dtype=np.uint8)
-            padded_image = Image.fromarray(padded_array)
-            padded_image.paste(img, box=(m, m))
-            xmin = bbox[0]
-            ymin = bbox[1]
-            xmax = bbox[0] + bbox[2] + 2*m
-            ymax = bbox[1] + bbox[3] + 2*m
-            cropped_with_margins = padded_image.crop(box=(xmin, ymin, xmax, ymax))
-            return cropped_with_margins
-
-    def binary_mask_from_polygons(self, polygons, width, height):
-        rle = mask_util.frPyObjects(polygons, height, width)  # Run-Length Encoding
-        decoded = mask_util.decode(rle)
-        if decoded.ndim == 3:    # disjoint object, multiple outline polygons on different channels
-            decoded = np.amax(decoded, 2)    # flattening by taking max along channels
-        mask = np.squeeze(decoded).transpose()  # binary mask
-        return mask
-    
-    def get_object(self, ann_id, image_id=None):
-
-        ''' Create a SegmentedObejct: create binary mask, get the relevant crops from original and mask. '''
-
-        ann = self.coco.anns[ann_id]
-
-        if len(ann['segmentation']) > 1:
-            return None
-        if ann['area'] < AREA_MIN or ann['area'] > AREA_MAX:
-            return None
-
-        if image_id is None:
-            image_id = ann['image_id']
-
-        img = self.get_pil_image(image_id=image_id)
+    angle = randint(-ANGLE, ANGLE)
+    scale = randint(100-SCALE, 100+SCALE)/100.0
+    # margin is too big at the moment, might calculate better placement parameters from mask
+    max_x_pos = max(0, target_image.width - int(scale * obj_img.width + MARGIN))
+    max_y_pos = max(0, target_image.height - int(scale * obj_img.height + MARGIN))
+    x = randint(0, max_x_pos)
+    y = randint(0, max_y_pos)
+    return {'x': x, 'y': y, 'angle': angle, 'scale': scale}
 
 
-        polygons = ann['segmentation']
-        mask = self.binary_mask_from_polygons(polygons, img.width, img.height)
-        mask_crop, origin_x, origin_y = self.crop_bbox_simple(mask, ann['bbox'], margin=MARGIN)
-        img_crop = self.crop_bbox_simple(img, ann['bbox'], margin=MARGIN)
+def check_overlap(mask_img, paste_param, occupancy_image):
 
-        # shift polygon origin
-        shifted_polys = []
-        for polygon in polygons:
-            poly = np.array(polygon)
-            poly = np.reshape(polygon, [np.max(poly.shape)/2, 2])
-            poly = poly - np.array([origin_x, origin_y])
-            shifted_polys.append(poly)
+    """ Adding binary mask to binary occupancy image, we have an overlap if any pixel gets higher than one. """
 
-        obj = SegmentedObject(img_crop, mask_crop, ann, shifted_polys)
-        return obj
+    mask = np.array(mask_img).transpose() / 255.0
+    placed_mask = np.zeros(occupancy_image.shape)
+    placed_mask[paste_param['x']:paste_param['x'] + mask.shape[0],
+                paste_param['y']:paste_param['y'] + mask.shape[1]] = mask
+    pasted = occupancy_image + placed_mask
+    return np.max(pasted) > 1.0, pasted
 
-    def show_ann_on_image(self, ann_ids, img=None):
 
-        ''' Display object mask on image. '''
-        if img is None:
-            ann0 = self.coco.anns[ann_ids[0]]
-            img = self.coco.imgs[ann0['image_id']]
-            I = io.imread(img['coco_url'])
-        else:
-            I = np.array(img)
-        anns = []
-        for ann_id in ann_ids:
-            ann = self.coco.anns[ann_id]
-            anns.append(ann)
-            print('Object: {}, size: {:01f}'.format(self.coco.cats[ann['category_id']]['name'], ann['area']))
-            
-        plt.imshow(I); plt.axis('off')
-        self.coco.showAnns(anns)
-        plt.show()
+def get_occupancy_image(existing_anns, coco_image):
 
-    def get_paste_parameters(self, target_image, obj_img):
-        angle = randint(-ANGLE, ANGLE)
-        scale = randint(100-SCALE, 100+SCALE)/100.0
-        # margin is too big at the moment, might calculate better placement parameters from mask
-        max_x_pos = max(0, target_image.width - int(scale * obj_img.width + MARGIN))
-        max_y_pos = max(0, target_image.height - int(scale * obj_img.height + MARGIN))
-        x = randint(0, max_x_pos)
-        y = randint(0, max_y_pos)
-        return {'x': x, 'y': y, 'angle': angle, 'scale': scale}
+    """ Joining binary masks to an occupancy image. """
 
-    def create_new_ann(self, obj, target_image, paste_param):
-        source_ann = obj.original_annotation
-        transformed_polys = []
-        transformed_np_polys = np.empty([0, 2])
-        for p in obj.poly:
-            poly = self.transform_polygon(paste_param, p, obj)
-            transformed_polys.append(poly.reshape(-1).tolist())
-            transformed_np_polys = np.vstack([transformed_np_polys, poly])
-        new_ann = dict()
-        new_ann.update({'image_id': source_ann['image_id'],
-                        'area': source_ann['area']*paste_param['scale']*paste_param['scale'],
-                        'iscrowd': source_ann['iscrowd'],
-                        'category_id': source_ann['category_id'],
-                        'id': self.object_id,
-                        'bbox': self.get_bbox_from_poly(transformed_np_polys),
-                        'segmentation': transformed_polys})
-        self.pasted_id_list.append(self.object_id)
-        self.object_id += 1
+    anns = existing_anns
+    if len(anns) == 0:
+        return np.zeros([coco_image['width'], coco_image['height']])
+    masks = np.zeros([coco_image['width'], coco_image['height'], len(anns)])
+    for i, ann in enumerate(anns):
+        masks[:, :, i] = binary_mask_from_polygons(ann['segmentation'], coco_image['width'], coco_image['height'])
 
-        # update COCO dataset with new annotation
-        self.coco.dataset['annotations'].append(new_ann)
-        self.coco.anns[new_ann['id']] = new_ann
-        self.coco.imgToAnns[new_ann['image_id']].append(new_ann)
-        return new_ann
+    occupancy_image = np.amax(masks, axis=2)
+    return occupancy_image
 
-    def transform_polygon(self, param, poly, obj):
 
-        """ Shift, scale and rotate polygon. """
+def create_new_ann(obj, paste_param):
 
-        a = radians(param['angle'])
-        rot = np.array([[cos(a), -sin(a)],[sin(a), cos(a)]])
-        shift = np.array(obj.mask.shape)/2
-        shifted_poly = poly - shift
-        rotated_poly = shifted_poly.dot(rot)
-        shift_back_poly = rotated_poly + shift
-        scaled_poly = shift_back_poly * np.array([param['scale'], param['scale']])
-        pasted_poly = scaled_poly + np.array([param['x'], param['y']])
-        return pasted_poly
+    """ Creating COCO annotation dict for object. """
 
-    def get_bbox_from_poly(self, poly):
+    source_ann = obj.original_annotation
+    transformed_polys = []
+    transformed_np_polys = np.empty([0, 2])
+    for p in obj.poly:
+        poly = transform_polygon(paste_param, p, obj)
+        transformed_polys.append(poly.reshape(-1).tolist())
+        transformed_np_polys = np.vstack([transformed_np_polys, poly])
+    new_ann = dict()
+    new_ann.update({'image_id': source_ann['image_id'],
+                    'area': source_ann['area']*paste_param['scale']*paste_param['scale'],
+                    'iscrowd': source_ann['iscrowd'],
+                    'category_id': source_ann['category_id'],
+                    'id': int(9e12),
+                    'bbox': get_bbox_from_poly(transformed_np_polys),
+                    'segmentation': transformed_polys})
 
-        """ Get x and y extremes from polygon that has form [[x1, y1], [x2, y2], ...] """
+    return new_ann
 
-        xmin, ymin = np.min(poly, axis=0)
-        xmax, ymax = np.max(poly, axis=0)
-        return [xmin, ymin, xmax, ymax]
 
-    def paste_object(self, obj, n=N, target_image=None):
+def transform_polygon(param, poly, obj):
 
-        ''' Paste the extracted SegmentedObject on an image n times, default target is the source image. '''
+    """ Shift, scale and rotate polygon. """
 
-        if obj is None:
-            return
+    a = radians(param['angle'])
+    rot = np.array([[cos(a), -sin(a)], [sin(a), cos(a)]])
+    shift = np.array(obj.mask.shape)/2
+    shifted_poly = poly - shift
+    rotated_poly = shifted_poly.dot(rot)
+    shift_back_poly = rotated_poly + shift
+    scaled_poly = shift_back_poly * np.array([param['scale'], param['scale']])
+    pasted_poly = scaled_poly + np.array([param['x'], param['y']])
+    return pasted_poly
 
-        if target_image is None:
-            target_image = self.get_pil_image(image_id=obj.source_image_id)
 
-        anns = []
-        for i in range(n):
-            overlap = True
-            paste_trials = 0
-            while overlap:
-                if paste_trials > 10:
-                    break
-                obj_img = obj.image
-                mask_img = Image.fromarray(obj.mask.transpose()*255)
+def get_bbox_from_poly(poly):
 
-                paste_param = self.get_paste_parameters(target_image, obj_img)
+    """ Get x and y extremes from polygon that has form [[x1, y1], [x2, y2], ...] """
 
-                # image transformation
-                obj_img = obj_img.rotate(paste_param['angle'], resample=Image.BICUBIC, expand=False)
-                mask_img = mask_img.rotate(paste_param['angle'], resample=Image.BICUBIC, expand=False)
+    xmin, ymin = np.min(poly, axis=0)
+    xmax, ymax = np.max(poly, axis=0)
+    return [xmin, ymin, xmax, ymax]
 
-                new_size = (np.array(obj_img.size) * paste_param['scale']).astype(np.int)
-                obj_img = obj_img.resize(new_size, resample=Image.BICUBIC)
-                mask_img = mask_img.resize(new_size, resample=Image.BICUBIC)
 
-                overlap = self.check_overlap(obj.source_image_id, mask_img, paste_param)
-                if overlap:
-                    paste_trials += 1
-                    continue
+def save_augmented_image(target_image, coco_image):
 
-                if BLUR_EDGES:
-                    mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
+    """ Save image to dir of augmented images. """
 
-                target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
-                ann = self.create_new_ann(obj, target_image, paste_param)
-            #target_image.show()
+    file_name = coco_image['file_name']
+    augmented_path = './{}_augmented/'.format(DATASET)
+    out_path = os.path.join(augmented_path, file_name)
+    target_image.save(out_path, quality=98)
 
-        self.save_augmented_image(target_image, obj.source_image_id)
 
-        # target_image.save('debug_img.jpg')
-        # self.show_ann_on_image(self.pasted_id_list, img=target_image)
+class ImageWithAnns:
 
-    def get_occupancy_image(self, image_id):
-        anns = self.coco.imgToAnns[image_id]
-        image = self.coco.imgs[image_id]
-        occupancy_image = np.zeros([image['width'], image['height']])
+    """ Class for handling COCO image and the corresponding annotations jointly."""
 
-        for ann in anns:
-            mask = self.binary_mask_from_polygons(ann['segmentation'], image['width'], image['height'])
-            occupancy_image = np.amax(np.stack([mask, occupancy_image], axis=2), axis=2)
+    def __init__(self, coco_image, anns):
+        self.image = coco_image
+        self.anns = anns
 
-        return occupancy_image
 
-    def check_overlap(self, image_id, mask_img, paste_param):
-        occupancy_image = self.get_occupancy_image(image_id)
-        mask = np.array(mask_img).transpose()/255.0
-        placed_mask = np.zeros(occupancy_image.shape)
-        placed_mask[paste_param['x']:paste_param['x']+mask.shape[0],
-                    paste_param['y']:paste_param['y']+mask.shape[1]] = mask
+def process_image(image_w_anns):
 
-        pasted = occupancy_image + placed_mask
+    """ Augmenting the image with randomly pasted objects. """
 
-        img = Image.fromarray(np.uint8(pasted.transpose()*100))
-        #img.show()
+    target_image = get_pil_image(image_w_anns.image)
+    occupancy_image = get_occupancy_image(image_w_anns.anns, image_w_anns.image)
 
-        return np.max(pasted) > 1.0
+    all_anns = image_w_anns.anns
 
-    def save_augmented_image(self, target_image, image_id):
+    try:
+        for ann in image_w_anns.anns:
+            if ann['id'] >= 9e12:
+                # this is a pasted object, we don't paste it again
+                break
 
-        """ Save image to dir of augmented images. """
-        file_name = self.coco.imgs[image_id]['file_name']
-        out_path = os.path.join(self.augmented_path, file_name)
-        target_image.save(out_path, quality=98)
+            # Cutting the object from the image and getting the corresponding annotation information.
+            obj = get_object(ann, source_image=target_image)
 
-    def save_augmented_dataset(self):
-        with open(self.augmented_ann_file, 'w') as output_file:
-            json.dump(self.coco.dataset, output_file)
+            # Pasting the cut object back to the image, appending the annotations and updating the occupancy image.
+            target_image, all_anns, occupancy_image = paste_object(obj,
+                                                                   target_image,
+                                                                   occupancy_image,
+                                                                   anns=all_anns)
+    except ValueError as e:
+        print(e)
 
-    def process_dataset(self):
-        # loop over all images in dataset
-        start = datetime.now()
-        num_images = len(self.coco.dataset['images'])
-        obj_counter = 0
-        for idx, coco_image in enumerate(self.coco.dataset['images']):
-            image_got_augmented = False
-            target_image = self.get_pil_image(image_id=coco_image['id'])
-            # loop over annotations for image
-            if idx % 100 == 0:
-                now = datetime.now()
-                print('[{}:{}:{}] Processed {}/{} \t\t number of pastes: {}'.format(now.hour, now.minute, now.second, num_images, idx, obj_counter*N))
-            try:
-                for ann in self.coco.imgToAnns[coco_image['id']]:
-                    if ann['id'] >= 9e12:
-                        break
-                    obj = self.get_object(ann_id=ann['id'])
-                    self.paste_object(obj, target_image=target_image)
-                    if obj is not None:
-                        obj_counter += 1
-                        image_got_augmented = True
-                    if obj is not None and AUGMENT_ONE_OBJECT_PER_IMAGE:
-                        break
-            except ValueError:
-                # Todo: log errors to get more information
-                pass
-            finally:
-                if not image_got_augmented:  # we keep the image even if it contained no small objects.
-                    self.save_augmented_image(target_image, coco_image['id'])
-        end = datetime.now()
-        duration = end-start
-        print('Dataset augmentation took {} seconds'.format(duration.seconds))
+    save_augmented_image(target_image, image_w_anns.image)
+    return all_anns
 
 
 def main():
-    dataset = 'val2017'
-    aug = DatasetAugmenter(dataset)
 
-    
+    # loading original annotations
+    dataset_name = DATASET
+    ann_file = './annotations/instances_{}.json'.format(dataset_name)
+    coco = COCO(ann_file)
 
-    aug.process_dataset()
-    aug.save_augmented_dataset()
-    interact(local=locals())
+    augmented_path = './{}_augmented/'.format(DATASET)
+    if not os.path.exists(augmented_path):
+        os.makedirs(augmented_path)
+
+    # pairing images with annotations and creating an array that can be parallel processed
+    images_with_annotations = []
+    for image in coco.dataset['images'][:1000]:
+        anns = coco.imgToAnns[image['id']]
+        images_with_annotations.append(ImageWithAnns(image, anns))
+
+    # augmenting all images with multiple threads.
+    augmented_anns_for_images = []
+    pool = Pool(8)
+    for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
+        augmented_anns_for_images.append(results)
+
+    # overwriting all annotations
+    augmented_anns = [ann for per_image in augmented_anns_for_images for ann in per_image]
+    coco.dataset['annotations'] = []
+    for idx, ann in enumerate(augmented_anns):
+        ann['id'] = idx
+        coco.dataset['annotations'].append(ann)
+
+    out_ann_file = './annotations/augmented_instances_{}.json'.format(dataset_name)
+    with open(out_ann_file, 'w') as out_file:
+        json.dump(coco.dataset, out_file)
+    print('Augmentations saved to {}.'.format(out_ann_file))
 
 
 if __name__ == '__main__':
