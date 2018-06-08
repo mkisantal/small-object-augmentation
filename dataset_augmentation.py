@@ -28,6 +28,8 @@ BLUR_EDGES = False
 N = 3  # number of pastes
 AUGMENT_ONE_OBJECT_PER_IMAGE = False  # if there are more small objects on an image, we only augment one
 
+COCO_ROOT = '/home/mate/data/coco'
+
 
 class SegmentedObject:
 
@@ -68,8 +70,8 @@ def get_pil_image(coco_image):
 
     """ Given a COCO image dict loading the corresponding image as PIL.Image. """
 
-    augmented_path = './{}_augmented/'.format(DATASET)
-    dataset_path = './{}/'.format(DATASET)
+    augmented_path = '{}/{}_augmented/'.format(COCO_ROOT, DATASET)
+    dataset_path = '{}/{}/'.format(COCO_ROOT, DATASET)
     file_name = coco_image['file_name']
     if file_name is not None:
         if os.path.exists(os.path.join(augmented_path, file_name)):
@@ -300,7 +302,7 @@ def save_augmented_image(target_image, coco_image):
     """ Save image to dir of augmented images. """
 
     file_name = coco_image['file_name']
-    augmented_path = './{}_augmented/'.format(DATASET)
+    augmented_path = '{}/{}_augmented/'.format(COCO_ROOT, DATASET)
     out_path = os.path.join(augmented_path, file_name)
     target_image.save(out_path, quality=98)
 
@@ -348,10 +350,10 @@ def main():
 
     # loading original annotations
     dataset_name = DATASET
-    ann_file = './annotations/instances_{}.json'.format(dataset_name)
+    ann_file = '{}/annotations/instances_{}.json'.format(COCO_ROOT, dataset_name)
     coco = COCO(ann_file)
 
-    augmented_path = './{}_augmented/'.format(DATASET)
+    augmented_path = '{}/{}_augmented/'.format(COCO_ROOT, DATASET)
     if not os.path.exists(augmented_path):
         os.makedirs(augmented_path)
 
@@ -374,7 +376,7 @@ def main():
         ann['id'] = idx
         coco.dataset['annotations'].append(ann)
 
-    out_ann_file = './annotations/augmented_instances_{}.json'.format(dataset_name)
+    out_ann_file = '{}/annotations/augmented_instances_{}.json'.format(COCO_ROOT, dataset_name)
     with open(out_ann_file, 'w') as out_file:
         json.dump(coco.dataset, out_file)
     print('Augmentations saved to {}.'.format(out_ann_file))
