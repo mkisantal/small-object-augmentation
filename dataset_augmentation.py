@@ -16,7 +16,7 @@ import tqdm
 
 
 # parameters
-DATASET = 'val2017'
+DATASET = 'train2017'
 MARGIN = 5  # [px]
 ANGLE = 15  # [+/- deg]
 SCALE = 20  # [+/- %]
@@ -28,7 +28,7 @@ BLUR_EDGES = False
 N = 3  # number of pastes
 AUGMENT_ONE_OBJECT_PER_IMAGE = False  # if there are more small objects on an image, we only augment one
 
-COCO_ROOT = '/home/mate/data/coco'
+COCO_ROOT = '/home/mate/data'
 
 
 class SegmentedObject:
@@ -359,7 +359,7 @@ def main():
 
     # pairing images with annotations and creating an array that can be parallel processed
     images_with_annotations = []
-    for image in coco.dataset['images'][:1000]:
+    for image in coco.dataset['images']:
         anns = coco.imgToAnns[image['id']]
         images_with_annotations.append(ImageWithAnns(image, anns))
 
