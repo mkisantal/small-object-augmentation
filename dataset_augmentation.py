@@ -294,7 +294,7 @@ def get_bbox_from_poly(poly):
 
     xmin, ymin = np.min(poly, axis=0)
     xmax, ymax = np.max(poly, axis=0)
-    return [xmin, ymin, xmax, ymax]
+    return [xmin, ymin, xmax-xmin, ymax-ymin]
 
 
 def save_augmented_image(target_image, coco_image):
@@ -365,7 +365,7 @@ def main():
 
     # augmenting all images with multiple threads.
     augmented_anns_for_images = []
-    pool = Pool(8)
+    pool = Pool(16)
     for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
         augmented_anns_for_images.append(results)
 
@@ -376,7 +376,7 @@ def main():
         ann['id'] = idx
         coco.dataset['annotations'].append(ann)
 
-    out_ann_file = '{}/annotations/augmented_instances_{}.json'.format(COCO_ROOT, dataset_name)
+    out_ann_file = '{}/annotations/instances_{}_augmented.json'.format(COCO_ROOT, dataset_name)
     with open(out_ann_file, 'w') as out_file:
         json.dump(coco.dataset, out_file)
     print('Augmentations saved to {}.'.format(out_ann_file))
