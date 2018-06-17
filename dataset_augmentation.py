@@ -19,10 +19,11 @@ import tqdm
 DATASET = 'train2017'
 MARGIN = 5  # [px]
 ANGLE = 15  # [+/- deg]
-SCALE = 20  # [+/- %]
+SCALE_MIN = 15  # [%]
+SCALE_MAX = 20  # [%] at least 5x error reduction
 ALLOW_DISJOINT_OBJECTS = False
-AREA_MAX = 1024  # [px^2]
-AREA_MIN = 0  # [px^2]
+AREA_MAX = 25600  # [px^2]
+AREA_MIN = 1600  # [px^2]
 BLUR_FILTER_SIZE = 5  # [px]
 BLUR_EDGES = False
 N = 3  # number of pastes
@@ -214,7 +215,7 @@ def get_paste_parameters(target_image, obj_img):
     """ Generating parameters for object placement. """
 
     angle = randint(-ANGLE, ANGLE)
-    scale = randint(100-SCALE, 100+SCALE)/100.0
+    scale = randint(SCALE_MIN, SCALE_MAX)/100.0
     # margin is too big at the moment, might calculate better placement parameters from mask
     max_x_pos = max(0, target_image.width - int(scale * obj_img.width + MARGIN))
     max_y_pos = max(0, target_image.height - int(scale * obj_img.height + MARGIN))
@@ -283,7 +284,7 @@ def transform_polygon(param, poly, obj):
     shifted_poly = poly - shift
     rotated_poly = shifted_poly.dot(rot)
     shift_back_poly = rotated_poly + shift
-    scaled_poly = shift_back_poly * np.array([param['scale'], param['scale']])
+    scaled_poly = shift_back_poly * np.array([param['scale'], param['scale']]) - 0.5
     pasted_poly = scaled_poly + np.array([param['x'], param['y']])
     return pasted_poly
 
