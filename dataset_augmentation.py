@@ -315,6 +315,20 @@ class ImageWithAnns:
         self.image = coco_image
         self.anns = anns
 
+def process_image_justcopy(image_w_anns):
+
+    contains_small_obj = False
+    for ann in image_w_anns.anns:
+        if AREA_MIN < ann['area'] < AREA_MAX:
+            contains_small_obj = True
+
+    if contains_small_obj:
+        target_image = get_pil_image(image_w_anns.image)
+        save_augmented_image(target_image, image_w_anns.image)
+        return image_w_anns.anns
+    else:
+        return []
+
 
 def process_image(image_w_anns):
 
@@ -366,15 +380,23 @@ def main():
     # augmenting all images with multiple threads.
     augmented_anns_for_images = []
     pool = Pool(16)
-    for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
+    # for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
+    for results in tqdm.tqdm(pool.imap(process_image_justcopy, images_with_annotations), total=len(images_with_annotations)):
         augmented_anns_for_images.append(results)
 
     # overwriting all annotations
     augmented_anns = [ann for per_image in augmented_anns_for_images for ann in per_image]
     coco.dataset['annotations'] = []
+    augmented_coco_images = []
+    image_ids = set()
     for idx, ann in enumerate(augmented_anns):
         ann['id'] = idx
         coco.dataset['annotations'].append(ann)
+        if ann['image_id'] not in image_ids:
+            image_ids.add(ann['image_id'])
+            augmented_coco_images.append(coco.imgs[ann['image_id']])
+
+    coco.dataset['images'] = augmented_coco_images
 
     out_ann_file = '{}/annotations/instances_{}_augmented.json'.format(COCO_ROOT, dataset_name)
     with open(out_ann_file, 'w') as out_file:
