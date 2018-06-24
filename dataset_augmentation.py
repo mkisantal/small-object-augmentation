@@ -26,7 +26,7 @@ AREA_MIN = 0  # [px^2]
 BLUR_FILTER_SIZE = 5  # [px]
 BLUR_EDGES = False
 N = 3  # number of pastes
-AUGMENT_ONE_OBJECT_PER_IMAGE = False  # if there are more small objects on an image, we only augment one
+AUGMENT_ONE_OBJECT_PER_IMAGE = True  # if there are more small objects on an image, we only augment one
 
 COCO_ROOT = '/home/mate/data'
 
@@ -268,7 +268,8 @@ def create_new_ann(obj, paste_param):
                     'category_id': source_ann['category_id'],
                     'id': int(9e12),
                     'bbox': get_bbox_from_poly(transformed_np_polys),
-                    'segmentation': transformed_polys})
+                    'segmentation': transformed_polys,
+                    'augmented': True})
 
     return new_ann
 
@@ -339,10 +340,14 @@ def process_image(image_w_anns):
                                                                    target_image,
                                                                    occupancy_image,
                                                                    anns=all_anns)
+            if obj is not None:
+                save_augmented_image(target_image, image_w_anns.image)
+                if AUGMENT_ONE_OBJECT_PER_IMAGE:
+                    break
     except ValueError as e:
         print(e)
 
-    save_augmented_image(target_image, image_w_anns.image)
+    # save_augmented_image(target_image, image_w_anns.image) Trying saving only augmented images
     return all_anns
 
 
@@ -372,9 +377,17 @@ def main():
     # overwriting all annotations
     augmented_anns = [ann for per_image in augmented_anns_for_images for ann in per_image]
     coco.dataset['annotations'] = []
+    augmented_coco_images = []
+    image_ids = set()
     for idx, ann in enumerate(augmented_anns):
         ann['id'] = idx
         coco.dataset['annotations'].append(ann)
+        if 'augmented' in ann.keys():
+            if ann['image_id'] not in image_ids:
+                image_ids.add(ann['image_id'])
+                augmented_coco_images.append(coco.imgs[ann['image_id']])
+
+    coco.dataset['images'] = augmented_coco_images
 
     out_ann_file = '{}/annotations/instances_{}_augmented.json'.format(COCO_ROOT, dataset_name)
     with open(out_ann_file, 'w') as out_file:
@@ -384,3 +397,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
