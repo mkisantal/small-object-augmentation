@@ -26,7 +26,7 @@ AREA_MAX = 1024  # [px^2]
 AREA_MIN = 0  # [px^2]
 BLUR_FILTER_SIZE = 5  # [px]
 BLUR_EDGES_RANDOMLY = False
-N = 3  # number of pastes
+N = 2  # number of pastes
 AUGMENT_ONE_OBJECT_PER_IMAGE = False  # if there are more small objects on an image, we only augment one
 AUGMENT_OBJECTS_ONCE = True
 LOOPED_AUGMENTATION = True
@@ -203,7 +203,7 @@ def paste_object(obj, target_image, occupancy_image, n=N, anns=()):
             else:
                 occupancy_image = new_occ_img
 
-            if BLUR_EDGES and random.random > 0.5:
+            if BLUR_EDGES_RANDOMLY and random.random > 0.5:
                 mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
 
             target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
@@ -330,10 +330,8 @@ def process_image_looped(image_w_anns):
 
     try:
         while paste_count < N:
+
             for ann in image_w_anns.anns:
-
-                print(paste_count)
-
                 if ann['id'] >= 9e12:
                     # this is a pasted object, we don't paste it again
                     break
@@ -362,7 +360,6 @@ def process_image_looped(image_w_anns):
 
             # or if we past an object only once, then stop and save
             if AUGMENT_OBJECTS_ONCE:
-                print('exiting')
                 save_augmented_image(target_image, image_w_anns.image)
                 return all_anns
 
@@ -417,7 +414,7 @@ def main():
 
     # pairing images with annotations and creating an array that can be parallel processed
     images_with_annotations = []
-    for image in coco.dataset['images'][:20]:
+    for image in coco.dataset['images']:
         anns = coco.imgToAnns[image['id']]
         images_with_annotations.append(ImageWithAnns(image, anns))
 
@@ -426,7 +423,6 @@ def main():
     pool = Pool(16)
 
     if LOOPED_AUGMENTATION:
-        print('DEBUG: looped')
         for results in tqdm.tqdm(pool.imap(process_image_looped, images_with_annotations), total=len(images_with_annotations)):
             augmented_anns_for_images.append(results)
     else:
