@@ -13,6 +13,7 @@ import json
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 import tqdm
+import random
 
 
 # parameters
@@ -24,9 +25,11 @@ ALLOW_DISJOINT_OBJECTS = False
 AREA_MAX = 1024  # [px^2]
 AREA_MIN = 0  # [px^2]
 BLUR_FILTER_SIZE = 5  # [px]
-BLUR_EDGES = False
+BLUR_EDGES_RANDOMLY = False
 N = 3  # number of pastes
-AUGMENT_ONE_OBJECT_PER_IMAGE = True  # if there are more small objects on an image, we only augment one
+AUGMENT_ONE_OBJECT_PER_IMAGE = False  # if there are more small objects on an image, we only augment one
+AUGMENT_OBJECTS_ONCE = True
+LOOPED_AUGMENTATION = True
 
 COCO_ROOT = '/home/mate/data'
 
@@ -200,7 +203,7 @@ def paste_object(obj, target_image, occupancy_image, n=N, anns=()):
             else:
                 occupancy_image = new_occ_img
 
-            if BLUR_EDGES:
+            if BLUR_EDGES and random.random > 0.5:
                 mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
 
             target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
@@ -317,6 +320,56 @@ class ImageWithAnns:
         self.anns = anns
 
 
+def process_image_looped(image_w_anns):
+    target_image = get_pil_image(image_w_anns.image)
+    occupancy_image = get_occupancy_image(image_w_anns.anns, image_w_anns.image)
+
+    all_anns = image_w_anns.anns
+
+    paste_count = 0
+
+    try:
+        while paste_count < N:
+            for ann in image_w_anns.anns:
+
+                print(paste_count)
+
+                if ann['id'] >= 9e12:
+                    # this is a pasted object, we don't paste it again
+                    break
+
+                # Cutting the object from the image and getting the corresponding annotation information.
+                obj = get_object(ann, source_image=target_image)
+
+                # Pasting the cut object back to the image, appending the annotations and updating the occupancy image.
+                target_image, all_anns, occupancy_image = paste_object(obj,
+                                                                       target_image,
+                                                                       occupancy_image,
+                                                                       n=1,
+                                                                       anns=all_anns)
+
+                if obj is not None:
+                    # save_augmented_image(target_image, image_w_anns.image)
+                    paste_count += 1
+
+                if paste_count >= N:
+                    save_augmented_image(target_image, image_w_anns.image)
+                    return all_anns
+
+            # if there are no small objects, then stop without adding image
+            if paste_count == 0:
+                return []
+
+            # or if we past an object only once, then stop and save
+            if AUGMENT_OBJECTS_ONCE:
+                print('exiting')
+                save_augmented_image(target_image, image_w_anns.image)
+                return all_anns
+
+    except ValueError as e:
+        print(e)
+
+
 def process_image(image_w_anns):
 
     """ Augmenting the image with randomly pasted objects. """
@@ -364,15 +417,24 @@ def main():
 
     # pairing images with annotations and creating an array that can be parallel processed
     images_with_annotations = []
-    for image in coco.dataset['images']:
+    for image in coco.dataset['images'][:20]:
         anns = coco.imgToAnns[image['id']]
         images_with_annotations.append(ImageWithAnns(image, anns))
 
     # augmenting all images with multiple threads.
     augmented_anns_for_images = []
     pool = Pool(16)
-    for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
-        augmented_anns_for_images.append(results)
+
+    if LOOPED_AUGMENTATION:
+        print('DEBUG: looped')
+        for results in tqdm.tqdm(pool.imap(process_image_looped, images_with_annotations), total=len(images_with_annotations)):
+            augmented_anns_for_images.append(results)
+    else:
+        for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
+            augmented_anns_for_images.append(results)
+
+
+
 
     # overwriting all annotations
     augmented_anns = [ann for per_image in augmented_anns_for_images for ann in per_image]
