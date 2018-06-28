@@ -366,6 +366,7 @@ def process_image_looped(image_w_anns):
     except ValueError as e:
         print(e)
 
+    return []
 
 def process_image(image_w_anns):
 
