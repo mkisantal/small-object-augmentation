@@ -14,6 +14,7 @@ from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 import tqdm
 import random
+import scipy.ndimage
 
 
 # parameters
@@ -203,10 +204,24 @@ def paste_object(obj, target_image, occupancy_image, n=N, anns=()):
             else:
                 occupancy_image = new_occ_img
 
-            if BLUR_EDGES_RANDOMLY and random.random() > 0.5:
-                mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
+            if BLUR_EDGES_RANDOMLY:
+                x = random.random()
+                if x < 0.33:
+                    mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
+                    target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
+                elif x < 0.66:
+                    paste_center = (paste_param['x']+mask_img.width/2, paste_param['y']+mask_img.height/2)
+                    dilated = scipy.ndimage.binary_dilation(np.asarray(mask_img), iterations=4)
+                    pasted = cv2.seamlessClone(np.asarray(obj_img), np.asarray(target_image),
+                                               dilated.astype(np.uint8)*255,
+                                               paste_center, cv2.NORMAL_CLONE)
+                    target_image = Image.fromarray(pasted)
+                else:
+                    target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
 
-            target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
+            else:
+                target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
+
             anns.append(create_new_ann(obj, paste_param))
 
     return target_image, anns, occupancy_image
