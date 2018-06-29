@@ -203,7 +203,7 @@ def paste_object(obj, target_image, occupancy_image, n=N, anns=()):
             else:
                 occupancy_image = new_occ_img
 
-            if BLUR_EDGES_RANDOMLY and random.random > 0.5:
+            if BLUR_EDGES_RANDOMLY and random.random() > 0.5:
                 mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
 
             target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
