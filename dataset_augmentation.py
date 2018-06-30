@@ -391,6 +391,8 @@ def process_image(image_w_anns):
     occupancy_image = get_occupancy_image(image_w_anns.anns, image_w_anns.image)
 
     all_anns = image_w_anns.anns
+    got_augmented = False
+
 
     try:
         for ann in image_w_anns.anns:
@@ -408,13 +410,17 @@ def process_image(image_w_anns):
                                                                    anns=all_anns)
             if obj is not None:
                 save_augmented_image(target_image, image_w_anns.image)
+                got_augmented = True
                 if AUGMENT_ONE_OBJECT_PER_IMAGE:
                     break
     except ValueError as e:
         print(e)
 
     # save_augmented_image(target_image, image_w_anns.image) Trying saving only augmented images
-    return all_anns
+    if got_augmented:
+        return all_anns
+    else:
+        return []
 
 
 def main():
