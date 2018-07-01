@@ -15,7 +15,7 @@ from multiprocessing.dummy import Pool as ThreadPool
 import tqdm
 import random
 import scipy.ndimage
-
+import signal
 
 # parameters
 DATASET = 'train2017'
@@ -51,6 +51,11 @@ class SegmentedObject:
         self.source_image_id = original_annotation['image_id']
         self.original_annotation = original_annotation
 
+
+def signal_handler(signal, frame):
+    print('handled: {}'.format(signal))
+
+signal.signal(signal.SIGSEGV, signal_handler)
 
 def show_ann_on_image(coco, ann_ids, img=None):
     if img is None:
@@ -210,12 +215,28 @@ def paste_object(obj, target_image, occupancy_image, n=N, anns=()):
                     mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
                     target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
                 elif x < 0.66:
-                    paste_center = (paste_param['x']+mask_img.width/2, paste_param['y']+mask_img.height/2)
-                    dilated = scipy.ndimage.binary_dilation(np.asarray(mask_img), iterations=4)
-                    pasted = cv2.seamlessClone(np.asarray(obj_img), np.asarray(target_image),
+                    try:
+                        extra_padding = 200
+                        target_np = np.asarray(target_image)
+                        if target_np.ndim == 3:
+                            padded_target = np.pad(target_np, extra_padding, 'constant',
+                                               constant_values=(0))[:, :, extra_padding:-extra_padding]
+                        else:
+                            raise cv2.error('1 channel bw image.')
+                            #padded_target = np.pad(target_np, extra_padding, 'constant', constant_values=(0))
+                        paste_center = (paste_param['x']+mask_img.width/2+extra_padding,
+                                        paste_param['y']+mask_img.height/2+extra_padding)
+                        dilated = scipy.ndimage.binary_dilation(np.asarray(mask_img), iterations=4)
+                        pasted = cv2.seamlessClone(np.asarray(obj_img), padded_target,
                                                dilated.astype(np.uint8)*255,
                                                paste_center, cv2.NORMAL_CLONE)
-                    target_image = Image.fromarray(pasted)
+                        target_image = Image.fromarray(pasted[extra_padding:-extra_padding,
+                                                              extra_padding:-extra_padding,
+                                                              :])
+                    except cv2.error as e:
+                        print('Catched cv2 error: {}'.format(e))
+                        mask_img = Image.fromarray(cv2.blur(np.array(mask_img), (BLUR_FILTER_SIZE, BLUR_FILTER_SIZE)))
+                        target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
                 else:
                     target_image.paste(obj_img, box=(paste_param['x'], paste_param['y']), mask=mask_img)
 
@@ -450,9 +471,6 @@ def main():
     else:
         for results in tqdm.tqdm(pool.imap(process_image, images_with_annotations), total=len(images_with_annotations)):
             augmented_anns_for_images.append(results)
-
-
-
 
     # overwriting all annotations
     augmented_anns = [ann for per_image in augmented_anns_for_images for ann in per_image]
